@@ -2,172 +2,274 @@ import os
 import asyncio
 import logging
 import sqlite3
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 
-# === НАСТРОЙКИ ===
 BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ===
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
 async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Showcase Bot is running!")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', handle_ping)
-    app.router.add_get('/health', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# === БАЗА ДАННЫХ ===
+# === БАЗА ДАННЫХ ВИТРИНЫ ===
 def init_db():
-    conn = sqlite3.connect("cafe.db")
+    conn = sqlite3.connect("showcase.db")
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS sales (
+    # Таблица десертов на витрине
+    # days_on_display - сколько дней лежит на витрине
+    cursor.execute('''CREATE TABLE IF NOT EXISTS display_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_name TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS packaging (
-        name TEXT PRIMARY KEY,
-        quantity INTEGER
+        name TEXT UNIQUE,
+        quantity INTEGER DEFAULT 0,
+        days_on_display INTEGER DEFAULT 1,
+        max_days INTEGER DEFAULT 3,
+        updated_at DATE
     )''')
     
-    initial_pack = [
-        ("Стаканы 250 мл", 500),
-        ("Стаканы 350 мл", 500),
-        ("Стаканы лимонад 300 мл", 300),
-        ("Стаканы лимонад 500 мл", 300),
-        ("Крышки 250 мл", 500),
-        ("Крышки 350 мл", 500),
-        ("Крышки купольные", 600),
-        ("Контейнер треугольный", 200),
-        ("Уголок бумажный", 300),
-        ("Пакет крафт с ручками", 150)
+    # Стартовый ассортимент витрины (Название, Макс. срок хранения на витрине в днях)
+    items = [
+        ("Чизкейк Нью-Йорк", 3),
+        ("Чизкейк Сан-Себастьян", 3),
+        ("Чизкейк Дубайский", 3),
+        ("Торт Медовик", 2),
+        ("Торт Наполеон", 2),
+        ("Круассан классический", 1),
+        ("Сэндвич с птицей", 1)
     ]
-    cursor.executemany("INSERT OR IGNORE INTO packaging VALUES (?, ?)", initial_pack)
+    for name, max_d in items:
+        cursor.execute("INSERT OR IGNORE INTO display_items (name, max_days, updated_at) VALUES (?, ?, ?)",
+                       (name, max_d, datetime.now().strftime("%Y-%m-%d")))
     conn.commit()
     conn.close()
 
-def log_sale(item_name):
-    conn = sqlite3.connect("cafe.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO sales (item_name) VALUES (?)", (item_name,))
-    
-    name_low = item_name.lower()
-    if "250" in name_low or "стандарт" in name_low:
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Стаканы 250 мл'")
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Крышки 250 мл'")
-    elif "350" in name_low:
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Стаканы 350 мл'")
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Крышки 350 мл'")
-    elif "чизкейк" in name_low or "торт" in name_low:
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Контейнер треугольный'")
-    elif "блин" in name_low or "хот-дог" in name_low:
-        cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Уголок бумажный'")
-        
-    conn.commit()
-    conn.close()
+# === СОСТОЯНИЯ (FSM) ===
+class ShowcaseStates(StatesGroup):
+    setting_morning_qty = State()
+    setting_evening_qty = State()
+    answering_restock = State()
 
 # === КЛАВИАТУРЫ ===
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="☕ Горячие напитки"), KeyboardButton(text="🥤 Холодные / Лимонады")],
-        [KeyboardButton(text="🍰 Чизкейки и Торты"), KeyboardButton(text="🥐 Выпечка, Десерты и Еда")],
-        [KeyboardButton(text="📦 Заявка на упаковку"), KeyboardButton(text="📊 Продажи за смену")]
+        [KeyboardButton(text="☀️ Открытие (Витрина утро)"), KeyboardButton(text="🌙 Закрытие (Витрина вечер)")],
+        [KeyboardButton(text="🔍 Контроль свежести (Статус)")],
     ],
     resize_keyboard=True
 )
 
-hot_drinks_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Капучино 250", callback_data="sell_Капучино 250"), InlineKeyboardButton(text="Капучино 350", callback_data="sell_Капучино 350")],
-    [InlineKeyboardButton(text="Латте 250", callback_data="sell_Латте 250"), InlineKeyboardButton(text="Латте 350", callback_data="sell_Латте 350")],
-    [InlineKeyboardButton(text="Американо 250", callback_data="sell_Американо 250"), InlineKeyboardButton(text="Американо 350", callback_data="sell_Американо 350")],
-    [InlineKeyboardButton(text="Раф 250", callback_data="sell_Раф 250"), InlineKeyboardButton(text="Раф 350", callback_data="sell_Раф 350")],
-    [InlineKeyboardButton(text="Флэт Уайт", callback_data="sell_Флэт Уайт"), InlineKeyboardButton(text="Какао 250", callback_data="sell_Какао 250")]
-])
-
-cheesecakes_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Чизкейк Нью-Йорк", callback_data="sell_Чизкейк Нью-Йорк")],
-    [InlineKeyboardButton(text="Чизкейк Сан-Себастьян", callback_data="sell_Чизкейк Сан-Себастьян")],
-    [InlineKeyboardButton(text="Чизкейк Дубайский", callback_data="sell_Чизкейк Дубайский шоколад")],
-    [InlineKeyboardButton(text="Торт Медовик", callback_data="sell_Медовик ДОМАШНИЙ")],
-    [InlineKeyboardButton(text="Торт Наполеон", callback_data="sell_Наполеон домашний")]
-])
-
 # === ХЕНДЛЕРЫ ===
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("☕ Бот учета для Кофейни запущен!\nВыберите категорию для продажи или учета:", reply_markup=main_kb)
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("☕ Бот контроля свежести витрины запущен!\nВыберите действие:", reply_markup=main_kb)
 
-@dp.message(F.text.contains("Горячие"))
-async def show_hot_drinks(message: types.Message):
-    await message.answer("Выберите напиток:", reply_markup=hot_drinks_kb)
-
-@dp.message(F.text.contains("Чизкейки"))
-async def show_cheesecakes(message: types.Message):
-    await message.answer("Выберите чизкейк/торт:", reply_markup=cheesecakes_kb)
-
-@dp.message(F.text.contains("Продажи"))
-async def show_stats(message: types.Message):
-    conn = sqlite3.connect("cafe.db")
+# --- 🔍 ПОКАЗ СТАТУСА ВИТРИНЫ ---
+@dp.message(F.text.contains("Контроль свежести"))
+async def check_showcase(message: types.Message):
+    conn = sqlite3.connect("showcase.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT item_name, COUNT(*) FROM sales WHERE date(timestamp) = date('now') GROUP BY item_name")
+    cursor.execute("SELECT name, quantity, days_on_display, max_days FROM display_items WHERE quantity > 0")
     rows = cursor.fetchall()
     conn.close()
     
     if not rows:
-        await message.answer("Сегодня еще ничего не было продано.")
+        await message.answer("🍰 Витрина сейчас пуста (или остатки не заполнены).")
         return
         
-    report = "📈 **Продано за сегодня:**\n\n"
-    for name, count in rows:
-        report += f"• {name}: {count} шт.\n"
-    await message.answer(report, parse_mode="Markdown")
-
-@dp.message(F.text.contains("Заявка"))
-async def show_pack_order(message: types.Message):
-    conn = sqlite3.connect("cafe.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, quantity FROM packaging")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    report = "📦 **Расчет остатков и Заявка на упаковку:**\n\n"
-    low_stock = []
-    
-    for name, qty in rows:
-        status = "✅" if qty > 100 else "⚠️ МАЛО!"
-        report += f"{status} {name}: остаток ~{qty} шт.\n"
-        if qty <= 100:
-            low_stock.append(name)
+    report = "🍰 **ТЕКУЩЕЕ СОСТОЯНИЕ ВИТРИНЫ:**\n\n"
+    for name, qty, days, max_d in rows:
+        if days > max_d:
+            status = "❌ **ПРОСРОЧЕНО (Списати!)**"
+        elif days == max_d:
+            status = "⚠️ **Срок истекает сегодня**"
+        else:
+            status = "✅ Свежее"
             
-    if low_stock:
-        report += "\n🚨 **СРОЧНО ЗАКАЗАТЬ:**\n" + "\n".join([f"- {item}" for item in low_stock])
-    else:
-        report += "\nВся упаковка в достаточном количестве!"
+        report += f"• **{name}**: {qty} шт.\n  └ Статус: {status} (На витрине: {days}-й день из {max_d})\n\n"
         
     await message.answer(report, parse_mode="Markdown")
 
-# Универсальный ответ на любой другой текст
-@dp.message()
-async def fallback_handler(message: types.Message):
-    await message.answer("Нажмите на одну из кнопок в меню ниже или введите /start", reply_markup=main_kb)
+# --- ☀️ УТРЕННЯЯ СМЕНА ---
+@dp.message(F.text.contains("Открытие"))
+async def start_morning(message: types.Message, state: FSMContext):
+    conn = sqlite3.connect("showcase.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, quantity FROM display_items")
+    items = cursor.fetchall()
+    conn.close()
+    
+    await state.update_data(items=items, index=0, morning_data={})
+    await ask_next_morning_item(message, state)
 
-@dp.callback_query(F.data.startswith("sell_"))
-async def process_sale(callback: types.CallbackQuery):
-    item_name = callback.data.split("sell_")[1]
-    log_sale(item_name)
-    await callback.answer(f"✅ Продано: {item_name}", show_alert=False)
-    await callback.message.edit_text(f"Успешно записано: **{item_name}**!\nВыберите следующую позицию или категорию в меню ниже.", parse_mode="Markdown")
+async def ask_next_morning_item(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    index = data['index']
+    items = data['items']
+    
+    if index < len(items):
+        item_name = items[index][0]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=str(i), callback_data=f"m_qty_{i}") for i in range(6)]
+        ])
+        await message.answer(f"☀️ Сколько **{item_name}** выставили на витрину?", reply_markup=kb, parse_mode="Markdown")
+        await state.set_state(ShowcaseStates.setting_morning_qty)
+    else:
+        # Сохраняем утренний ввод
+        conn = sqlite3.connect("showcase.db")
+        cursor = conn.cursor()
+        for name, qty in data['morning_data'].items():
+            cursor.execute("UPDATE display_items SET quantity = ? WHERE name = ?", (qty, name))
+        conn.commit()
+        conn.close()
+        
+        await message.answer("✅ Утренний учет витрины сохранен! Хорошей смены!", reply_markup=main_kb)
+        await state.clear()
+
+@dp.callback_query(F.data.startswith("m_qty_"), ShowcaseStates.setting_morning_qty)
+async def process_morning_qty(callback: types.CallbackQuery, state: FSMContext):
+    qty = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    index = data['index']
+    item_name = data['items'][index][0]
+    
+    morning_data = data['morning_data']
+    morning_data[item_name] = qty
+    
+    await state.update_data(morning_data=morning_data, index=index + 1)
+    await callback.answer()
+    await ask_next_morning_item(callback.message, state)
+
+# --- 🌙 ВЕЧЕРНЯЯ СМЕНА И ПРОВЕРКА РОТАЦИИ ---
+@dp.message(F.text.contains("Закрытие"))
+async def start_evening(message: types.Message, state: FSMContext):
+    conn = sqlite3.connect("showcase.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, quantity, days_on_display FROM display_items WHERE quantity > 0")
+    items = cursor.fetchall()
+    conn.close()
+    
+    if not items:
+        await message.answer("На витрине с утра ничего не было. Закрытие не требуется.")
+        return
+
+    await state.update_data(items=items, index=0, evening_data={})
+    await ask_next_evening_item(message, state)
+
+async def ask_next_evening_item(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    index = data['index']
+    items = data['items']
+    
+    if index < len(items):
+        item_name = items[index][0]
+        max_q = items[index][1] # Утреннее кол-во
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=str(i), callback_data=f"e_qty_{i}") for i in range(max_q + 1)]
+        ])
+        await message.answer(f"🌙 Сколько **{item_name}** осталось вечером? (Утром было: {max_q} шт.)", reply_markup=kb, parse_mode="Markdown")
+        await state.set_state(ShowcaseStates.setting_evening_qty)
+    else:
+        # Переходим к проверке ротации/докладывания
+        await start_restock_check(message, state)
+
+@dp.callback_query(F.data.startswith("e_qty_"), ShowcaseStates.setting_evening_qty)
+async def process_evening_qty(callback: types.CallbackQuery, state: FSMContext):
+    qty = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    index = data['index']
+    item_name = data['items'][index][0]
+    
+    evening_data = data['evening_data']
+    evening_data[item_name] = qty
+    
+    await state.update_data(evening_data=evening_data, index=index + 1)
+    await callback.answer()
+    await ask_next_evening_item(callback.message, state)
+
+# Опрос: Докладывали ли свежие из заморозки?
+async def start_restock_check(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    evening_data = data['evening_data']
+    
+    # Ищем позицию, которая осталась на вечер
+    restock_questions = [name for name, qty in evening_data.items() if qty > 0]
+    
+    await state.update_data(restock_questions=restock_questions, q_index=0)
+    await ask_restock_question(message, state)
+
+async def ask_restock_question(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    q_index = data['q_index']
+    questions = data['restock_questions']
+    
+    if q_index < len(questions):
+        item_name = questions[q_index]
+        qty = data['evening_data'][item_name]
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🆕 Докладывали свежие", callback_data="restock_yes")],
+            [InlineKeyboardButton(text="⏳ Лежит с утра / прошлых дней", callback_data="restock_no")]
+        ])
+        await message.answer(
+            f"❓ Позиция **{item_name}** осталась на витрине ({qty} шт.).\n\n Вы выставляли свежие десерты из заморозки в течение дня или это тот же десерт, что и с утра?",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        await state.set_state(ShowcaseStates.answering_restock)
+    else:
+        # Сохраняем финальные данные и обновляем счетчик дней
+        conn = sqlite3.connect("showcase.db")
+        cursor = conn.cursor()
+        
+        for name, qty in data['evening_data'].items():
+            cursor.execute("UPDATE display_items SET quantity = ? WHERE name = ?", (qty, name))
+            
+        conn.commit()
+        conn.close()
+        
+        await message.answer("✅ Вечерний учет сохранен! Смена закрыта.", reply_markup=main_kb)
+        await state.clear()
+
+@dp.callback_query(F.data.startswith("restock_"), ShowcaseStates.answering_restock)
+async def process_restock_answer(callback: types.CallbackQuery, state: FSMContext):
+    answer = callback.data.split("_")[1]
+    data = await state.get_data()
+    q_index = data['q_index']
+    item_name = data['restock_questions'][q_index]
+    
+    conn = sqlite3.connect("showcase.db")
+    cursor = conn.cursor()
+    
+    if answer == "yes":
+        # Если докладывали свежие, счетчик дней сбрасывается на 1
+        cursor.execute("UPDATE display_items SET days_on_display = 1 WHERE name = ?", (item_name,))
+    else:
+        # Если остался старый, увеличиваем счетчик на 1 день
+        cursor.execute("UPDATE display_items SET days_on_display = days_on_display + 1 WHERE name = ?", (item_name,))
+        
+    conn.commit()
+    conn.close()
+    
+    await state.update_data(q_index=q_index + 1)
+    await callback.answer()
+    await ask_restock_question(callback.message, state)
 
 # === ЗАПУСК ===
 async def main():
