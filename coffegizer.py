@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = "8888700652:AAG6zMFOUbmV31HKNmPzs-27d3YYi0Yv4gU"
+BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
