@@ -4,13 +4,9 @@ import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.client.session.aiohttp import AiohttpSession
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "8888700652:AAG6zMFOUbmV31HKNmPzs-27d3YYi0Yv4gU"
-
-# Подключаем официальный прокси PythonAnywhere для бесплатного тарифа
-session = AiohttpSession(proxy="http://proxy.server:3128")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -19,19 +15,16 @@ dp = Dispatcher()
 def init_db():
     conn = sqlite3.connect("cafe.db")
     cursor = conn.cursor()
-    # Таблица для учета продаж
     cursor.execute('''CREATE TABLE IF NOT EXISTS sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         item_name TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
-    # Таблица для учета остатков упаковки
     cursor.execute('''CREATE TABLE IF NOT EXISTS packaging (
         name TEXT PRIMARY KEY,
         quantity INTEGER
     )''')
     
-    # Стартовый запас упаковки (создается при первом запуске)
     initial_pack = [
         ("Стаканы 250 мл", 500),
         ("Стаканы 350 мл", 500),
@@ -53,7 +46,6 @@ def log_sale(item_name):
     cursor = conn.cursor()
     cursor.execute("INSERT INTO sales (item_name) VALUES (?)", (item_name,))
     
-    # Правила автоматического списания упаковки
     name_low = item_name.lower()
     if "250" in name_low or "стандарт" in name_low:
         cursor.execute("UPDATE packaging SET quantity = quantity - 1 WHERE name = 'Стаканы 250 мл'")
@@ -72,9 +64,7 @@ def log_sale(item_name):
     conn.commit()
     conn.close()
 
-# === КЛАВИАТУРЫ (ИНТЕРФЕЙС БАРИСТА) ===
-
-# Главное меню внизу экрана
+# === КЛАВИАТУРЫ ===
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="☕ Горячие напитки"), KeyboardButton(text="🥤 Холодные / Лимонады")],
@@ -84,7 +74,6 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Категория: Горячие напитки
 hot_drinks_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Капучино 250", callback_data="sell_Капучино 250"), InlineKeyboardButton(text="Капучино 350", callback_data="sell_Капучино 350")],
     [InlineKeyboardButton(text="Латте 250", callback_data="sell_Латте 250"), InlineKeyboardButton(text="Латте 350", callback_data="sell_Латте 350")],
@@ -94,7 +83,6 @@ hot_drinks_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Чай 200", callback_data="sell_Чай 200 мл"), InlineKeyboardButton(text="Чай 300", callback_data="sell_Чай 300 мл")]
 ])
 
-# Категория: Чизкейки и Торты
 cheesecakes_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Чизкейк Нью-Йорк", callback_data="sell_Чизкейк Нью-Йорк")],
     [InlineKeyboardButton(text="Чизкейк Сан-Себастьян", callback_data="sell_Чизкейк Сан-Себастьян")],
@@ -105,8 +93,7 @@ cheesecakes_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Торт Наполеон", callback_data="sell_Наполеон домашний")]
 ])
 
-# === ОБРАБОТЧИКИ СООБЩЕНИЙ ===
-
+# === ХЕНДЛЕРЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer("☕ Бот учета для Кофейни запущен!\nВыберите категорию для продажи или учета:", reply_markup=main_kb)
@@ -160,7 +147,6 @@ async def show_pack_order(message: types.Message):
         
     await message.answer(report, parse_mode="Markdown")
 
-# Фиксация продажи при нажатии на инлайн-кнопку
 @dp.callback_query(F.data.startswith("sell_"))
 async def process_sale(callback: types.CallbackQuery):
     item_name = callback.data.split("sell_")[1]
@@ -168,7 +154,7 @@ async def process_sale(callback: types.CallbackQuery):
     await callback.answer(f"✅ Продано: {item_name}", show_alert=False)
     await callback.message.edit_text(f"Успешно записано: **{item_name}**!\nВыберите следующую позицию или категорию в меню ниже.", parse_mode="Markdown")
 
-# === ЗАПУСК БОТА ===
+# === ЗАПУСК ===
 async def main():
     init_db()
     await dp.start_polling(bot)
