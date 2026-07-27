@@ -14,20 +14,44 @@ from aiohttp import web
 # === НАСТРОЙКИ И РОЛИ ===
 BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"
 
-# Список Telegram ID Администраторов и Директоров
-ADMIN_IDS = [1864446293, 1344845997]  # <-- ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID
+# Список Telegram ID Администраторов/Директоров
+ADMIN_IDS = [1864446293, 1344845997]  # <-- Вставьте ваш Telegram ID
+
+EVOTOR_SECRET_TOKEN = "coffegizer_secret_123"  # Токен, который вы указали в поле "Ваш токен"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER И ЭВОТОРА ===
 async def handle_ping(request):
-    return web.Response(text="Showcase & Finance Bot is running!")
+    return web.Response(text="Showcase & Evotor Bot is running!")
+
+# Прием уведомлений о продажах и выручке от Эвотора
+async def handle_evotor_webhook(request):
+    try:
+        data = await request.json()
+        logging.info(f"Получены данные от Эвотор: {data}")
+        
+        # Если Эвотор передает сумму чека/продажи
+        if isinstance(data, dict):
+            amount = data.get("body", {}).get("total", 0) or data.get("totalSum", 0)
+            if amount > 0:
+                conn = sqlite3.connect("cafe_management.db")
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO revenue (amount, created_at) VALUES (?, CURRENT_DATE)", (float(amount),))
+                conn.commit()
+                conn.close()
+                logging.info(f"Автоматически зачислена выручка с Эвотора: {amount} руб.")
+    except Exception as e:
+        logging.error(f"Ошибка при обработке вебхука Эвотора: {e}")
+        
+    return web.Response(text="OK", status=200)
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', handle_ping)
     app.router.add_get('/health', handle_ping)
+    app.router.add_post('/evotor-webhook', handle_evotor_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
@@ -93,14 +117,14 @@ class BotStates(StatesGroup):
     waiting_for_edit_date = State()
     setting_new_revenue = State()
 
-# === КЛАВИАТУРА ДЛЯ АДМИНАИ БАРИСТА ===
+# === КЛАВИАТУРА ===
 def get_main_keyboard(user_id: int):
     if user_id in ADMIN_IDS:
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="☀️ Открытие (Витрина)"), KeyboardButton(text="🌙 Закрытие (Витрина)")],
                 [KeyboardButton(text="📊 Итоги за месяц"), KeyboardButton(text="📆 Отчет за день")],
-                [KeyboardButton(text="💸 Добавить расход"), KeyboardButton(text="💵 Внести выручку")],
+                [KeyboardButton(text="💸 Добавить расход"), KeyboardButton(text="💵 Внести выручку вручную")],
                 [KeyboardButton(text="✏️ Редактировать день"), KeyboardButton(text="🔍 Контроль свежести")]
             ],
             resize_keyboard=True
@@ -253,7 +277,7 @@ async def check_showcase(message: types.Message):
         
     await message.answer(report, parse_mode="Markdown")
 
-# --- 📊 БОЛЬШАЯ ТАБЛИЦА ЗА МЕСЯЦ С ДЕТАЛИЗАЦИЕЙ ---
+# --- 📊 БОЛЬШАЯ ТАБЛИЦА ЗА МЕСЯЦ ---
 @dp.message(F.text.contains("Итоги за месяц"))
 async def show_month_summary(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -288,13 +312,12 @@ async def show_month_summary(message: types.Message):
         total_rev += r
         total_exp += e
         
-        # Собираем детализацию расходов за день
         exp_details = ""
         if exp_rows:
             details_str = ", ".join([f"{desc}: {amt:,.0f}₽" for desc, amt in exp_rows])
             exp_details = f"\n   └ 💸 *Расходы:* {details_str}"
             
-        report += f"• **{d[8:]}.{d[5:7]}**: Выручка {r:,.0f} ₽ | Прибыль: {profit:+,.0f} ₽{exp_details}\n\n"
+        report += f"• **{d[8:]}.{d[5:7]}**: Выручка (Эвотор): {r:,.0f} ₽ | Прибыль: {profit:+,.0f} ₽{exp_details}\n\n"
         
     conn.close()
     
@@ -306,7 +329,7 @@ async def show_month_summary(message: types.Message):
     
     await message.answer(report, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
-# --- ✏️ РЕДАКТИРОВАНИЕ ВЫРУЧКИ И РАСХОДОВ ЗА ЛЮБОЙ ДЕНЬ ---
+# --- ✏️ РЕДАКТИРОВАНИЕ ДНЯ ---
 @dp.message(F.text.contains("Редактировать день"))
 async def edit_day_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -365,7 +388,7 @@ async def clear_exp_process(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(f"🗑 Все расходы за **{target_date}** успешно очищены!", reply_markup=get_main_keyboard(callback.from_user.id))
     await callback.answer()
 
-# --- 📆 ОТЧЕТ ЗА ДЕНЬ И ВВОД РАСХОДОВ/ВЫРУЧКИ ---
+# --- 📆 ОТЧЕТ ЗА ДЕНЬ И ВВОД РАСХОДОВ ---
 @dp.message(F.text.contains("Отчет за день"))
 async def day_report_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -388,7 +411,7 @@ async def process_day_report(message: types.Message, state: FSMContext):
     conn.close()
     
     report = f"📆 **ФИНАНСЫ ЗА {target_date}:**\n\n"
-    report += f"💵 **Выручка:** {rev:,.2f} руб.\n"
+    report += f"💵 **Выручка (Эвотор):** {rev:,.2f} руб.\n"
     report += f"💸 **Расходы:** {exp_total:,.2f} руб.\n"
     report += f"📈 **Прибыль:** {(rev - exp_total):,.2f} руб.\n\n"
     
@@ -426,7 +449,7 @@ async def process_add_expense(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Расход **{desc}** ({amount} руб.) сохранен!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
-@dp.message(F.text.contains("Внести выручку"))
+@dp.message(F.text.contains("Внести выручку вручную"))
 async def add_revenue_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -439,7 +462,7 @@ async def process_add_revenue(message: types.Message, state: FSMContext):
         amount = float(message.text.replace(",", ".").strip())
         conn = sqlite3.connect("cafe_management.db")
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO revenue (amount) VALUES (?)", (amount,))
+        cursor.execute("INSERT INTO revenue (amount, created_at) VALUES (?, CURRENT_DATE)", (amount,))
         conn.commit()
         conn.close()
         
