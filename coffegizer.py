@@ -1,15 +1,31 @@
+import os
 import asyncio
 import logging
 import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiohttp import web
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"
+BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"  
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER (Health Check) ===
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 # === БАЗА ДАННЫХ ===
 def init_db():
@@ -157,6 +173,7 @@ async def process_sale(callback: types.CallbackQuery):
 # === ЗАПУСК ===
 async def main():
     init_db()
+    await start_web_server()  # Запускаем фиктивный порт для Render
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
