@@ -3,6 +3,7 @@ import asyncio
 import logging
 import sqlite3
 import re
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -37,6 +38,7 @@ async def start_web_server():
 def init_db():
     conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
+    
     # Таблица витрины
     cursor.execute('''CREATE TABLE IF NOT EXISTS showcase (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,19 +47,21 @@ def init_db():
         days_on_display INTEGER DEFAULT 1,
         max_days INTEGER DEFAULT 3
     )''')
-    # Таблица расходов
+    
+    # Таблица расходов с фиксацией даты
     cursor.execute('''CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT,
         amount REAL,
         description TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATE DEFAULT CURRENT_DATE
     )''')
-    # Таблица выручки
+    
+    # Таблица выручки с фиксацией даты
     cursor.execute('''CREATE TABLE IF NOT EXISTS revenue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         amount REAL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at DATE DEFAULT CURRENT_DATE
     )''')
     conn.commit()
     conn.close()
@@ -88,20 +92,20 @@ class BotStates(StatesGroup):
     answering_restock = State()
     adding_expense = State()
     adding_revenue = State()
+    waiting_for_day_report = State()
 
 # === КЛАВИАТУРЫ ПО РОЛЯМ ===
 def get_main_keyboard(user_id: int):
-    # Если пользователь АДМИН / ДИРЕКТОР
     if user_id in ADMIN_IDS:
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="☀️ Открытие (Витрина)"), KeyboardButton(text="🌙 Закрытие (Витрина)")],
-                [KeyboardButton(text="📊 Финансы и Выручка"), KeyboardButton(text="💸 Добавить расход")],
-                [KeyboardButton(text="💵 Внести выручку"), KeyboardButton(text="🔍 Контроль свежести")]
+                [KeyboardButton(text="📊 Итоги за месяц"), KeyboardButton(text="📆 Отчет за день")],
+                [KeyboardButton(text="💸 Добавить расход"), KeyboardButton(text="💵 Внести выручку")],
+                [KeyboardButton(text="🔍 Контроль свежести")]
             ],
             resize_keyboard=True
         )
-    # Если обычный БАРИСТА
     else:
         return ReplyKeyboardMarkup(
             keyboard=[
@@ -250,52 +254,104 @@ async def check_showcase(message: types.Message):
         
     await message.answer(report, parse_mode="Markdown")
 
-# --- 👑 ФИНАНСЫ И АДМИНИСТРИРОВАНИЕ (Только для ADMIN_IDS) ---
-@dp.message(F.text.contains("Финансы"))
-async def show_finances(message: types.Message):
+# --- 👑 ФИНАНСОВАЯ АНАЛИТИКА И ТАБЛИЦЫ (Для ADMIN_IDS) ---
+
+# 1. Отчет за конкретный день
+@dp.message(F.text.contains("Отчет за день"))
+async def day_report_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-        
+    await state.set_state(BotStates.waiting_for_day_report)
+    await message.answer("📆 **Введите дату для отчета:**\n(Например: `2026-07-27` или напишите `сегодня`)", parse_mode="Markdown")
+
+@dp.message(BotStates.waiting_for_day_report)
+async def process_day_report(message: types.Message, state: FSMContext):
+    target_date = datetime.now().strftime("%Y-%m-%d") if "сегодня" in message.text.lower() else message.text.strip()
+    
     conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
     
-    # Выручка за сегодня
-    cursor.execute("SELECT SUM(amount) FROM revenue WHERE date(created_at) = date('now')")
-    rev_today = cursor.fetchone()[0] or 0.0
+    cursor.execute("SELECT SUM(amount) FROM revenue WHERE created_at = ?", (target_date,))
+    rev = cursor.fetchone()[0] or 0.0
     
-    # Расходы за сегодня
-    cursor.execute("SELECT SUM(amount) FROM expenses WHERE date(created_at) = date('now')")
-    exp_today = cursor.fetchone()[0] or 0.0
-    
-    # Последние 5 расходов
-    cursor.execute("SELECT description, amount FROM expenses ORDER BY id DESC LIMIT 5")
-    expenses_list = cursor.fetchall()
+    cursor.execute("SELECT description, amount FROM expenses WHERE created_at = ?", (target_date,))
+    exp_list = cursor.fetchall()
+    exp_total = sum(amt for _, amt in exp_list)
     conn.close()
     
-    report = f"📊 **ФИНАНСОВЫЙ ОТЧЕТ ЗА СЕГОДНЯ:**\n\n"
-    report += f"💵 **Выручка:** {rev_today:,.2f} руб.\n"
-    report += f"💸 **Расходы:** {exp_today:,.2f} руб.\n"
-    report += f"📈 **Чистая прибыль:** {(rev_today - exp_today):,.2f} руб.\n\n"
+    report = f"📆 **ФИНАНСЫ ЗА {target_date}:**\n\n"
+    report += f"💵 **Выручка:** {rev:,.2f} руб.\n"
+    report += f"💸 **Расходы:** {exp_total:,.2f} руб.\n"
+    report += f"📈 **Прибыль:** {(rev - exp_total):,.2f} руб.\n\n"
     
-    if expenses_list:
-        report += "📝 **Последние внесенные расходы:**\n"
-        for desc, amt in expenses_list:
-            report += f"• {desc}: {amt} руб.\n"
+    if exp_list:
+        report += "📝 **Список расходов за день:**\n"
+        for desc, amt in exp_list:
+            report += f"• {desc}: {amt:,.2f} руб.\n"
             
-    await message.answer(report, parse_mode="Markdown")
+    await state.clear()
+    await message.answer(report, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
+# 2. Большая таблица за полный месяц
+@dp.message(F.text.contains("Итоги за месяц"))
+async def show_month_summary(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+        
+    current_month = datetime.now().strftime("%Y-%m")
+    
+    conn = sqlite3.connect("cafe_management.db")
+    cursor = conn.cursor()
+    
+    # Получаем все уникальные даты текущего месяца
+    cursor.execute("SELECT DISTINCT created_at FROM (SELECT created_at FROM revenue WHERE created_at LIKE ? UNION SELECT created_at FROM expenses WHERE created_at LIKE ?) ORDER BY created_at ASC", (f"{current_month}%", f"{current_month}%"))
+    dates = [row[0] for row in cursor.fetchall()]
+    
+    if not dates:
+        await message.answer(f"📊 В месяце {current_month} записей пока нет.")
+        conn.close()
+        return
+        
+    report = f"📊 **БОЛЬШАЯ ТАБЛИЦА ЗА {current_month}:**\n\n"
+    total_rev = 0
+    total_exp = 0
+    
+    for d in dates:
+        cursor.execute("SELECT SUM(amount) FROM revenue WHERE created_at = ?", (d,))
+        r = cursor.fetchone()[0] or 0.0
+        
+        cursor.execute("SELECT SUM(amount) FROM expenses WHERE created_at = ?", (d,))
+        e = cursor.fetchone()[0] or 0.0
+        
+        profit = r - e
+        total_rev += r
+        total_exp += e
+        
+        report += f"• **{d[8:]}.{d[5:7]}**: Выручка {r:,.0f} | Расход {e:,.0f} | Прибыль: {profit:+,.0f} ₽\n"
+        
+    conn.close()
+    
+    report += "\n----------------------------------\n"
+    report += f"💰 **ИТОГО ЗА МЕСЯЦ:**\n"
+    report += f"💵 Общая выручка: **{total_rev:,.2f} руб.**\n"
+    report += f"💸 Всего расходов: **{total_exp:,.2f} руб.**\n"
+    report += f"📈 **Чистая прибыль: {(total_rev - total_exp):,.2f} руб.**"
+    
+    await message.answer(report, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+
+# 3. Быстрый ввод расхода
 @dp.message(F.text.contains("Добавить расход"))
 async def add_expense_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     await state.set_state(BotStates.adding_expense)
-    await message.answer("💸 **Введите расход и сумму через пробел:**\n(Например: `Закупка молока 450` или `Такси 300`)", parse_mode="Markdown")
+    await message.answer("💸 **Введите расход и сумму:**\n(Например: `Закупка молока 450`)", parse_mode="Markdown")
 
 @dp.message(BotStates.adding_expense)
 async def process_add_expense(message: types.Message, state: FSMContext):
     nums = re.findall(r'\d+', message.text)
     if not nums:
-        await message.answer("⚠️ Не удалось распознать сумму. Напишите: `Описание Сумма`")
+        await message.answer("⚠️ Не удалось разобрать сумму. Напишите: `Описание Сумма`")
         return
     
     amount = float(nums[-1])
@@ -308,14 +364,15 @@ async def process_add_expense(message: types.Message, state: FSMContext):
     conn.close()
     
     await state.clear()
-    await message.answer(f"✅ Расход **{desc}** на сумму **{amount} руб.** успешно записан!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+    await message.answer(f"✅ Расход **{desc}** ({amount} руб.) сохранен!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
+# 4. Быстрый ввод выручки
 @dp.message(F.text.contains("Внести выручку"))
 async def add_revenue_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     await state.set_state(BotStates.adding_revenue)
-    await message.answer("💵 **Введите сумму кассовой выручки за день:**", parse_mode="Markdown")
+    await message.answer("💵 **Введите сумму кассовой выручки за сегодня:**", parse_mode="Markdown")
 
 @dp.message(BotStates.adding_revenue)
 async def process_add_revenue(message: types.Message, state: FSMContext):
@@ -328,9 +385,9 @@ async def process_add_revenue(message: types.Message, state: FSMContext):
         conn.close()
         
         await state.clear()
-        await message.answer(f"✅ Выручка **{amount} руб.** успешно внесена!", reply_markup=get_main_keyboard(message.from_user.id))
+        await message.answer(f"✅ Выручка **{amount} руб.** за сегодня внесена!", reply_markup=get_main_keyboard(message.from_user.id))
     except ValueError:
-        await message.answer("⚠️ Введите корректное число (сумму выручки).")
+        await message.answer("⚠️ Введите число (сумму выручки).")
 
 # === ЗАПУСК ===
 async def main():
