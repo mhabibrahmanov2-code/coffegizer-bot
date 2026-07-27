@@ -10,14 +10,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 
+# === НАСТРОЙКИ И РОЛИ ===
 BOT_TOKEN = "8888700652:AAHGPgLcdDoaBaRcjBdjLxE1KzBDh_rHUyA"
+
+# Список Telegram ID Администраторов и Директоров (узнать в @userinfobot)
+ADMIN_IDS = [1864446293, 1344845997]  # <-- ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
 async def handle_ping(request):
-    return web.Response(text="Showcase Bot is running!")
+    return web.Response(text="Showcase & Finance Bot is running!")
 
 async def start_web_server():
     app = web.Application()
@@ -31,18 +35,33 @@ async def start_web_server():
 
 # === БАЗА ДАННЫХ ===
 def init_db():
-    conn = sqlite3.connect("showcase.db")
+    conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
+    # Таблица витрины
     cursor.execute('''CREATE TABLE IF NOT EXISTS showcase (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE,
         quantity INTEGER DEFAULT 0,
-        days_on_display INTEGER DEFAULT 1
+        days_on_display INTEGER DEFAULT 1,
+        max_days INTEGER DEFAULT 3
+    )''')
+    # Таблица расходов
+    cursor.execute('''CREATE TABLE IF NOT EXISTS expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT,
+        amount REAL,
+        description TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    # Таблица выручки
+    cursor.execute('''CREATE TABLE IF NOT EXISTS revenue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        amount REAL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     conn.commit()
     conn.close()
 
-# Парсер текстового списка (находит название и цифру в конце строки)
 def parse_text_items(text: str):
     items = []
     lines = text.strip().split('\n')
@@ -50,14 +69,10 @@ def parse_text_items(text: str):
         line = line.strip()
         if not line:
             continue
-        # Поиск числа в конце строки (например, "Чизкейк Дубайский 2" или "Наполеон - 1")
         match = re.search(r'^(.*?)\s*[-:]?\s*(\d+)\s*шт\.?$', line, re.IGNORECASE)
         if match:
-            name = match.group(1).strip()
-            qty = int(match.group(2))
-            items.append((name, qty))
+            items.append((match.group(1).strip(), int(match.group(2))))
         else:
-            # Если число не в конце, пробуем вытащить любое последнее число
             nums = re.findall(r'\d+', line)
             if nums:
                 qty = int(nums[-1])
@@ -66,39 +81,54 @@ def parse_text_items(text: str):
                     items.append((name, qty))
     return items
 
-# === СОСТОЯНИЯ (FSM) ===
-class ShowcaseStates(StatesGroup):
+# === СОСТОЯНИЯ ===
+class BotStates(StatesGroup):
     waiting_for_morning_list = State()
     waiting_for_evening_list = State()
     answering_restock = State()
+    adding_expense = State()
+    adding_revenue = State()
 
-# === КЛАВИАТУРА ===
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="☀️ Открытие (Витрина утро)"), KeyboardButton(text="🌙 Закрытие (Витрина вечер)")],
-        [KeyboardButton(text="🔍 Контроль свежести (Статус)")]
-    ],
-    resize_keyboard=True
-)
+# === КЛАВИАТУРЫ ПО РОЛЯМ ===
+def get_main_keyboard(user_id: int):
+    # Если пользователь АДМИН / ДИРЕКТОР
+    if user_id in ADMIN_IDS:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="☀️ Открытие (Витрина)"), KeyboardButton(text="🌙 Закрытие (Витрина)")],
+                [KeyboardButton(text="📊 Финансы и Выручка"), KeyboardButton(text="💸 Добавить расход")],
+                [KeyboardButton(text="💵 Внести выручку"), KeyboardButton(text="🔍 Контроль свежести")]
+            ],
+            resize_keyboard=True
+        )
+    # Если обычный БАРИСТА
+    else:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="☀️ Открытие (Витрина)"), KeyboardButton(text="🌙 Закрытие (Витрина)")],
+                [KeyboardButton(text="🔍 Контроль свежести")]
+            ],
+            resize_keyboard=True
+        )
 
 # === ОБРАБОТЧИКИ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
+    role_title = "👑 Администратор / Директор" if message.from_user.id in ADMIN_IDS else "☕ Бариста"
     await message.answer(
-        "🍰 **Бот учета и свежести витрины**\n\n"
-        "Нажмите **☀️ Открытие** утром и отправьте список выставленных десертов текстом!",
-        reply_markup=main_kb,
+        f"Добро пожаловать! Ваш статус: **{role_title}**\n\n"
+        "Выберите нужное действие в меню ниже:",
+        reply_markup=get_main_keyboard(message.from_user.id),
         parse_mode="Markdown"
     )
 
-# --- ☀️ УТРЕННЕЕ ОТКРЫТИЕ ---
+# --- ☀️ УТРЕННЕЕ ОТКРЫТИЕ (Для всех) ---
 @dp.message(F.text.contains("Открытие"))
 async def start_morning(message: types.Message, state: FSMContext):
-    await state.set_state(ShowcaseStates.waiting_for_morning_list)
+    await state.set_state(BotStates.waiting_for_morning_list)
     await message.answer(
-        "☀️ **Напишите, что именно вы выставили на витрину:**\n\n"
-        "Каждую позицию пишите с новой строчки и указывайте количество.\n\n"
+        "☀️ **Напишите список выставленной витрины:**\n\n"
         "**Пример:**\n"
         "Чизкейк Дубайский 1\n"
         "Круассан с ветчиной 5\n"
@@ -106,68 +136,48 @@ async def start_morning(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-@dp.message(ShowcaseStates.waiting_for_morning_list)
+@dp.message(BotStates.waiting_for_morning_list)
 async def process_morning_list(message: types.Message, state: FSMContext):
     parsed = parse_text_items(message.text)
     if not parsed:
-        await message.answer("⚠️ Не удалось распознать количество. Напишите список в формате:\nНазвание количество\n(Например: `Наполеон 2`)", parse_mode="Markdown")
+        await message.answer("⚠️ Не удалось разобрать текст. Напишите в формате: `Название количество`", parse_mode="Markdown")
         return
 
-    conn = sqlite3.connect("showcase.db")
+    conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
-    
-    # Сбрасываем старую витрину или обновляем позиции
     report = "✅ **Принято на утреннюю витрину:**\n\n"
     for name, qty in parsed:
-        # Если позиция уже была, оставляем её дни, меняем кол-во
         cursor.execute("INSERT INTO showcase (name, quantity, days_on_display) VALUES (?, ?, 1) "
                        "ON CONFLICT(name) DO UPDATE SET quantity = ?", (name, qty, qty))
         report += f"• {name}: {qty} шт.\n"
-        
     conn.commit()
     conn.close()
     
     await state.clear()
-    await message.answer(report, reply_markup=main_kb, parse_mode="Markdown")
+    await message.answer(report, reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
 
-# --- 🌙 ВЕЧЕРНЕЕ ЗАКРЫТИЕ ---
+# --- 🌙 ВЕЧЕРНЕЕ ЗАКРЫТИЕ (Для всех) ---
 @dp.message(F.text.contains("Закрытие"))
 async def start_evening(message: types.Message, state: FSMContext):
-    await state.set_state(ShowcaseStates.waiting_for_evening_list)
-    await message.answer(
-        "🌙 **Напишите, что осталось на витрине в конце смены:**\n\n"
-        "**Пример:**\n"
-        "Чизкейк Дубайский 1\n"
-        "Торт Медовик 1\n\n"
-        "*(Если витрина пустая — просто напишите: 0)*",
-        parse_mode="Markdown"
-    )
+    await state.set_state(BotStates.waiting_for_evening_list)
+    await message.answer("🌙 **Напишите, что осталось на витрине вечером:**\n(Если ничего не осталось — отправьте 0)", parse_mode="Markdown")
 
-@dp.message(ShowcaseStates.waiting_for_evening_list)
+@dp.message(BotStates.waiting_for_evening_list)
 async def process_evening_list(message: types.Message, state: FSMContext):
-    if message.text.strip() == "0":
-        parsed = []
-    else:
-        parsed = parse_text_items(message.text)
-
-    conn = sqlite3.connect("showcase.db")
+    parsed = [] if message.text.strip() == "0" else parse_text_items(message.text)
+    conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
     
-    # Сверяем вечерний остаток
     evening_dict = {name: qty for name, qty in parsed}
-    
-    # Получаем все утренние позиции
     cursor.execute("SELECT name, quantity FROM showcase WHERE quantity > 0")
     morning_items = cursor.fetchall()
     
     restock_questions = []
-    
     for name, m_qty in morning_items:
         e_qty = evening_dict.get(name, 0)
         cursor.execute("UPDATE showcase SET quantity = ? WHERE name = ?", (e_qty, name))
         if e_qty > 0:
             restock_questions.append(name)
-
     conn.commit()
     conn.close()
     
@@ -175,7 +185,7 @@ async def process_evening_list(message: types.Message, state: FSMContext):
         await state.update_data(questions=restock_questions, q_index=0)
         await ask_restock_question(message, state)
     else:
-        await message.answer("✅ Вечерний остаток сохранен! Витрина пуста. Хорошего отдыха!", reply_markup=main_kb)
+        await message.answer("✅ Смена закрыта! Витрина пуста.", reply_markup=get_main_keyboard(message.from_user.id))
         await state.clear()
 
 async def ask_restock_question(message: types.Message, state: FSMContext):
@@ -189,24 +199,20 @@ async def ask_restock_question(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="🆕 Докладывали свежий из заморозки", callback_data="restock_yes")],
             [InlineKeyboardButton(text="⏳ Лежит с утра / прошлых дней", callback_data="restock_no")]
         ])
-        await message.answer(
-            f"❓ Позиция **{item_name}** осталась на витрине.\n\n Вы выставляли свежий из заморозки в течение дня или это тот самый, что выставили с утра?",
-            reply_markup=kb,
-            parse_mode="Markdown"
-        )
-        await state.set_state(ShowcaseStates.answering_restock)
+        await message.answer(f"❓ Позиция **{item_name}** осталась на витрине.\n\nВы докладывали свежий из заморозки в течение дня или он лежит с утра?", reply_markup=kb, parse_mode="Markdown")
+        await state.set_state(BotStates.answering_restock)
     else:
-        await message.answer("✅ Сверка свежести завершена! Вечерняя смена закрыта.", reply_markup=main_kb)
+        await message.answer("✅ Сверка завершена! Вечерняя смена закрыта.", reply_markup=get_main_keyboard(message.from_user.id))
         await state.clear()
 
-@dp.callback_query(F.data.startswith("restock_"), ShowcaseStates.answering_restock)
+@dp.callback_query(F.data.startswith("restock_"), BotStates.answering_restock)
 async def process_restock_answer(callback: types.CallbackQuery, state: FSMContext):
     answer = callback.data.split("_")[1]
     data = await state.get_data()
     q_index = data['q_index']
     item_name = data['questions'][q_index]
     
-    conn = sqlite3.connect("showcase.db")
+    conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
     if answer == "yes":
         cursor.execute("UPDATE showcase SET days_on_display = 1 WHERE name = ?", (item_name,))
@@ -219,12 +225,12 @@ async def process_restock_answer(callback: types.CallbackQuery, state: FSMContex
     await callback.answer()
     await ask_restock_question(callback.message, state)
 
-# --- 🔍 ПОКАЗ СТАТУСА СВЕЖЕСТИ ---
+# --- 🔍 ПОКАЗ СВЕЖЕСТИ (Для всех) ---
 @dp.message(F.text.contains("Контроль свежести"))
 async def check_showcase(message: types.Message):
-    conn = sqlite3.connect("showcase.db")
+    conn = sqlite3.connect("cafe_management.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT name, quantity, days_on_display FROM showcase WHERE quantity > 0")
+    cursor.execute("SELECT name, quantity, days_on_display, max_days FROM showcase WHERE quantity > 0")
     rows = cursor.fetchall()
     conn.close()
     
@@ -232,18 +238,99 @@ async def check_showcase(message: types.Message):
         await message.answer("🍰 Витрина пуста.")
         return
         
-    report = "📋 **СТАТУС ВИТРИНЫ И СВЕЖЕСТЬ:**\n\n"
-    for name, qty, days in rows:
-        if days == 1:
-            status = "🟢 Свежий (1-й день)"
-        elif days == 2:
-            status = "🟡 2-й день на витрине"
+    report = "📋 **СТАТУС СВЕЖЕСТИ ВИТРИНЫ:**\n\n"
+    for name, qty, days, max_d in rows:
+        if days > max_d:
+            status = "🔴 **ПРОСРОЧЕНО (Списать!)**"
+        elif days == max_d:
+            status = f"🟡 {days}-й день (Срок истекает сегодня)"
         else:
-            status = f"🔴 {days}-й день (**ВНИМАНИЕ! Проверить / Списать**)"
-            
-        report += f"• **{name}**: {qty} шт.\n  └ {status}\n"
+            status = f"🟢 Свежий ({days}-й день)"
+        report += f"• **{name}**: {qty} шт.\n  └ Status: {status}\n"
         
     await message.answer(report, parse_mode="Markdown")
+
+# --- 👑 ФИНАНСЫ И АДМИНИСТРИРОВАНИЕ (Только для ADMIN_IDS) ---
+@dp.message(F.text.contains("Финансы"))
+async def show_finances(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+        
+    conn = sqlite3.connect("cafe_management.db")
+    cursor = conn.cursor()
+    
+    # Выручка за сегодня
+    cursor.execute("SELECT SUM(amount) FROM revenue WHERE date(created_at) = date('now')")
+    rev_today = cursor.fetchone()[0] or 0.0
+    
+    # Расходы за сегодня
+    cursor.execute("SELECT SUM(amount) FROM expenses WHERE date(created_at) = date('now')")
+    exp_today = cursor.fetchone()[0] or 0.0
+    
+    # Последние 5 расходов
+    cursor.execute("SELECT description, amount FROM expenses ORDER BY id DESC LIMIT 5")
+    expenses_list = cursor.fetchall()
+    conn.close()
+    
+    report = f"📊 **ФИНАНСОВЫЙ ОТЧЕТ ЗА СЕГОДНЯ:**\n\n"
+    report += f"💵 **Выручка:** {rev_today:,.2f} руб.\n"
+    report += f"💸 **Расходы:** {exp_today:,.2f} руб.\n"
+    report += f"📈 **Чистая прибыль:** {(rev_today - exp_today):,.2f} руб.\n\n"
+    
+    if expenses_list:
+        report += "📝 **Последние внесенные расходы:**\n"
+        for desc, amt in expenses_list:
+            report += f"• {desc}: {amt} руб.\n"
+            
+    await message.answer(report, parse_mode="Markdown")
+
+@dp.message(F.text.contains("Добавить расход"))
+async def add_expense_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await state.set_state(BotStates.adding_expense)
+    await message.answer("💸 **Введите расход и сумму через пробел:**\n(Например: `Закупка молока 450` или `Такси 300`)", parse_mode="Markdown")
+
+@dp.message(BotStates.adding_expense)
+async def process_add_expense(message: types.Message, state: FSMContext):
+    nums = re.findall(r'\d+', message.text)
+    if not nums:
+        await message.answer("⚠️ Не удалось распознать сумму. Напишите: `Описание Сумма`")
+        return
+    
+    amount = float(nums[-1])
+    desc = re.sub(r'\d+', '', message.text).strip()
+    
+    conn = sqlite3.connect("cafe_management.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO expenses (description, amount) VALUES (?, ?)", (desc, amount))
+    conn.commit()
+    conn.close()
+    
+    await state.clear()
+    await message.answer(f"✅ Расход **{desc}** на сумму **{amount} руб.** успешно записан!", reply_markup=get_main_keyboard(message.from_user.id), parse_mode="Markdown")
+
+@dp.message(F.text.contains("Внести выручку"))
+async def add_revenue_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await state.set_state(BotStates.adding_revenue)
+    await message.answer("💵 **Введите сумму кассовой выручки за день:**", parse_mode="Markdown")
+
+@dp.message(BotStates.adding_revenue)
+async def process_add_revenue(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.replace(",", ".").strip())
+        conn = sqlite3.connect("cafe_management.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO revenue (amount) VALUES (?)", (amount,))
+        conn.commit()
+        conn.close()
+        
+        await state.clear()
+        await message.answer(f"✅ Выручка **{amount} руб.** успешно внесена!", reply_markup=get_main_keyboard(message.from_user.id))
+    except ValueError:
+        await message.answer("⚠️ Введите корректное число (сумму выручки).")
 
 # === ЗАПУСК ===
 async def main():
